@@ -1,0 +1,887 @@
+---
+title: "Uber Price Prediction"
+author: "Abel Tekle"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+    pdf_document: default
+  pdf_document:
+    toc: yes
+subtitle: Predicting the Price of Uber Rides in New York City
+---
+
+```{r setup, include=FALSE}
+
+
+library(corrplot)  
+library(discrim)  
+library(corrr)   
+library(MASS)    
+library(tidyverse)   
+library(tidymodels)
+library(ggplot2)   
+library(dplyr)     
+library(geosphere)
+library(ranger)
+library(xgboost)
+library(dials)
+library(tune)
+library(reader)
+library(knitr)
+library(kableExtra)
+library(tidytext)
+library(vembedr)
+tidymodels_prefer()
+
+
+
+knitr::opts_chunk$set(   # basic chunk settings
+    echo = TRUE,
+    fig.height = 5,
+    fig.width = 7,
+    tidy = TRUE,
+    tidy.opts = list(width.cutoff = 60)
+)
+
+
+```
+
+![](images/how-to-become-an-uber-driver.webp){width="583"}
+
+# Introduction
+
+In this project, our aim is to develop a model that can accurately predict the price of an Uber ride and identify what factors most highly influence it. I have obtained a data set from Kaggle that has 200,000 individual Uber rides from the greater New York City Area from 2009 to 2015.
+
+### Data citation
+
+This data was taken from the Kaggle data set, "[Uber Fares Dataset](https://www.kaggle.com/datasets/yasserh/uber-fares-dataset/data)," by user M YASSER H .
+
+The data was sourced from Google and collected via Research.
+
+### What is Uber?
+
+```{r,echo=FALSE}
+embed_url("https://www.youtube.com/watch?v=tQlgavP5cmo") %>%
+  use_align("center")
+```
+
+Uber is a ride-sharing platform that connects passengers with drivers via a mobile application. The platform is known for its convenience and ability to offer on-demand transportation services. Uber's pricing is dynamic, varying according to factors including supply and demand, the distance of the trip, and local pricing strategies.
+
+### Why are we doing this?
+
+Analyzing Uber's pricing structure is essential for several reasons. It provides passengers with insights into cost-effective travel times and conditions in New York City and beyond. It also helps drivers determine the most lucrative times and areas to drive. For urban planners and researchers, understanding the determinants of ride-sharing costs can offer broader insights into urban transportation trends and assist in planning smarter cities.
+
+In this project, we aim to explore various data points such as trip distances, time stamps, passenger count, prices, and pickup and drop-off locations. By examining these variables, we hope to identify patterns and insights that lead to the development of a robust model capable of predicting ride costs. This can serve as a valuable tool for all stakeholders involved in the ride-sharing ecosystem.
+
+# Inspecting The Data
+
+Before we apply any statistical machine learning techniques to our data set we will need to inspect our data set and alter, add, or remove columns/rows that are not helping us in finding relationships. First lets read in the data!
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(999)
+df <- read_csv("uber.csv")
+
+kable(head(df), "html") %>%
+  kable_styling(bootstrap_options = c("responsive"), full_width = F) %>%
+  scroll_box(width = "100%", height = "500px")
+```
+
+Now we can see that we are dealing with a data set that contains 8 columns with 200,000 rows of data. Each rows represents a unique ride with the observed factors:
+
+## Describing the Predictors
+
+Target : `fare_amount` - the cost of each trip in USD
+
+`key` - a unique identifier for each trip
+
+`pickup_datetime` - date and time when the meter was engaged
+
+`passenger_count` - the number of passengers in the vehicle (driver entered value)
+
+`pickup_longitude` - the longitude where the meter was engaged
+
+`pickup_latitude` - the latitude where the meter was engaged
+
+`dropoff_longitude` - the longitude where the meter was disengaged
+
+`dropoff_latitude` - the latitude where the meter was disengaged
+
+New Variables to be include later in project:
+
+`pickup_dist_to_nyc_center` - The distance of the pickup location to the center of New York City (in kilometers)
+
+`ride_distance_km` - The total distance of the ride (in kilometers)
+
+`day_of_week` - The day of week the ride takes place (Monday-Sunday)
+
+`pickup_hour` - The hour of the day the meter was engaged (0-23)
+
+`year` - The year the meter was engaged (xxxx)
+
+`month` - The month the meter was engaged (January-December)
+
+## Data Cleaning
+
+Now that we are familiarized with the data set we can drop certain columns that are of no use for this project. Such as the key, and we will also remove obs with missing values.
+
+```{r, warning=FALSE, message=FALSE}
+#remove key column 
+df<- df %>% 
+  dplyr::select(-key) %>%
+   dplyr::select(-...1)
+  
+#remove missing  values
+df <- na.omit(df)
+dim(df)
+
+```
+
+Now that we have removed the key lets turn our attention to the other variables, first we will remove any observations that include any coordinate errors, since we know longitude must be in the range of +- 180 and latitude must be in the range +-90 we can remove values out of that range, as these are likely errors.
+
+```{r,warning=FALSE}
+# remove cordinate erros from df 
+df <- df %>%
+  filter(between(pickup_longitude, -180, 180),
+         between(pickup_latitude, -90, 90),
+         between(dropoff_longitude, -180, 180),
+         between(dropoff_latitude, -90, 90))
+
+dim(df)
+
+```
+
+## Feature engineering
+
+Next, we will add some columns to our data set that will make the data more interpretable for machine learning.
+
+First, we will extract the `day_of_week`, `pickup_hour`, `year`, and `month` from `pickup_datetime` and add each one to a separate column. By doing this, we will make this information more accessible and allow each one to be an independent factor in our analysis. Each one has the potential to influence ride prices, so it is important we do this to enhance the interoperability of the data set.
+
+Secondly, we will use the pickup and drop-off coordinates to create a `ride_distance_km` column that will have the distance of each ride in km. This is important because distance is a huge factor in the price of an Uber, and interpreting distance directly from coordinates would be unreliable and enhance the complexity of the model. Hence, creating this new column would be highly logical.\
+
+```{r}
+#extracting the the day_of_week, pickup_hour_minute,year, and month from the pickup_datetime variable, and adding each one as a seperate column
+df <- df %>%
+  mutate(pickup_datetime = as.POSIXct(pickup_datetime, format = "%Y-%m-%d %H:%M:%OS"),
+         day_of_week = weekdays(pickup_datetime),
+         pickup_hour = format(pickup_datetime, "%H"),
+         year = as.integer(format(pickup_datetime, "%Y")),
+         month = format(pickup_datetime, "%B"))
+
+
+# calcuate ride_distance in km and add it as a column in df
+df <- df %>%
+  mutate(
+    ride_distance_km = distHaversine(
+      matrix(c(pickup_longitude, pickup_latitude), ncol = 2),
+      matrix(c(dropoff_longitude, dropoff_latitude), ncol = 2)
+    ) / 1000  # Convert meters to kilometers
+  )
+
+# Remove pickup_datetime as it is no longer useful
+df <- df %>%
+  dplyr::select(-pickup_datetime)
+
+kable(head(df["ride_distance_km"]))
+
+
+```
+
+Since the pickup/drop-off location is encoded within four columns, we have already extracted the ride length. Another feature we could extract from this column would be the distance from the city center of New York to the start of a ride. By creating this feature, we will be able to see the relationships between ride prices and distances from the theoretical busiest part of the city.
+
+```{r, message=FALSE, warning=TRUE}
+
+# Coordinates for the center of New York City
+nyc_center <- c(-74.0060, 40.7128)
+
+# Calculate the distance from pickup and dropoff locations to the center of NYC
+df$pickup_dist_to_nyc_center <- distHaversine(p1 = df[, c("pickup_longitude", "pickup_latitude")], 
+                                               p2 = nyc_center)
+
+
+# Convert the distance from meters to kilometers
+df$pickup_dist_to_nyc_center <- df$pickup_dist_to_nyc_center / 1000
+
+
+# View the first few entries of the new columns
+kable(head(df["pickup_dist_to_nyc_center"]))
+
+```
+
+```{r}
+kable(summary(df), "html") %>%
+  kable_styling(bootstrap_options = c("responsive"), full_width = F) %>%
+  scroll_box(width = "100%", height = "500px")
+```
+
+Here is a summary of our data set. As we can see, there are some discrepancies we should handle before evaluation.
+
+-   `Fare_amount`: we can see there is a minimum fare amount of -52 and a max of 499( which is very far from the third quantile of 12.5
+
+-   `Passenger_count`: there is a min of 0, which could be a data error as you can't have 0 passengers in a ride, and a max of 208, which is impossible as the max number of passengers in an Uber ride is 7
+
+-   `Ride_distance`: there is a min of 0km, which could be a data error, and a max of 8783km, which is likely a data error as well
+
+To address this, we will remove rows where the ride distance is less than or equal to 0 and the same for the fare amount. And also set reasonable thresholds for eliminating data errors. Since our data set contains 200,000 observations, we can afford to remove them.
+
+```{r}
+# remove rides where fare & distance is equal or less then 0
+df <- df[df$fare_amount > 0 & df$ride_distance_km > 0, ]
+# remove rides where passeneger count is equal to 0 
+df <- df[df$passenger_count > 0, ]
+
+#take care of erros
+max_distance <- 40# Set a maximum plausible distance
+max_passenger <- 7 # det a maxiumum plausible passenger count 
+max_fare <- 80     # Set a maximum plausible fare
+df <- df[df$ride_distance_km <= max_distance & df$fare_amount <= max_fare & df$passenger_count <= max_passenger & df$pickup_dist_to_nyc_center <= max_distance, ]
+
+print(200000-NROW(df))
+
+
+```
+
+Now that we have cleaned some errors from our data set, we have removed a total of 7,166 obs from it.
+
+Now, we will change categorical variables into factors and remove any columns with missing values to ensure our data contains only interoperable observations.
+
+```{r, warning=TRUE, message= FALSE}
+#check the sate of each variable 
+kable(str(df))
+
+```
+
+```{r,message=FALSE}
+df$day_of_week <- as.factor(df$day_of_week)
+df$passenger_count <- as.factor(df$passenger_count)
+df$year <- as.factor(df$year) 
+df$month <- factor(df$month)
+df$pickup_hour <- as.factor(df$pickup_hour)
+
+df <- na.omit(df)
+
+```
+
+Now that are data is cleaned and prepared for analysis, lets sample approximately 1/10 of the population to continue with the analysis. The reasoning for this is to avoid over plotting in our EDA section and to reduce computational load on model training.
+
+```{r}
+# randonly sample 20,000 rows from the data set 
+df <- df[sample(nrow(df), size=20000), ]
+```
+
+Lets Move onto our EDA!
+
+# EDA
+
+As part of our Exploratory Data Analysis, we will be conducting an in-depth study of our data set. We will be examining each variable and its relationship with other variables. This is an important step that will help us gain a better understanding of our data and guide us in developing an appropriate model.In our Exploratory data Analysis section, we will be doing a deep dive into our data set and learn more about each variable and the relationships that they have with each other, this is a crucial step that will provide context into how we should tackle modeling our data.
+
+## Correlation Plot
+
+```{r, message=FALSE}
+# Calculate the correlation matrix
+numeric_vars <- sapply(df, is.numeric)
+cor_matrix <- cor(df[, numeric_vars], use = "complete.obs")  
+
+
+#plot heatmap with corr
+corrplot(cor_matrix, method = "color",
+         type = "upper", 
+         order = "hclust", 
+         addCoef.col = "black",  
+         tl.col = "black", 
+         tl.srt = 45, 
+         tl.cex = 0.8,  # Size of the text labels
+         number.cex = 0.6,  # Size of the numbers in cells
+         
+)
+
+```
+
+In our correlation matrix, we can observe some interesting relationships and analyze the coefficients. The correlation coefficient between ride distance and fare amount is +0.89, which is higher than I expected. This indicates a strong positive correlation between these two variables.
+
+Similarly, pickup longitude and pickup distance to the city center have a correlation coefficient of +0.85. This correlation seems logical to me, considering that New York City is primarily a vertical city. Therefore, the longitudinal coordinate of a pickup location is likely to have a high correlation with its distance from the city center.
+
+## Visual plots
+
+\
+In this section we will visualize the distribution of key features in our data set.
+
+```{r, message=FALSE}
+
+# Histogram for 'fare_amount'
+ggplot(df, aes(x = fare_amount)) +
+  geom_histogram(bins = 200, fill = "blue", color = "black") +
+  coord_cartesian(xlim = c(0, 40))+
+  labs(title = "Histogram of Fare Amount", x = "Fare Amount", y = "Frequency")
+
+```
+
+The histogram shows the spread of fare amounts, indicating that the majority of fares are in the lower price range, with the most common fares being between \$5 and \$10. There is a noticeable tail on the right side of the graph, which suggests that although most fares are modest, there are a few instances where the fare amount is substantially higher. This distribution implies that the cost of a ride is affordable for most passengers, but there are outliers where the journey is considerably more expensive due to factors such as longer distances, traffic conditions, or premium service choices.
+
+```{r, message=FALSE}
+# Histogram for 'passenger_count'
+ggplot(df, aes(x = passenger_count)) +
+geom_bar(fill = "lightblue", color = "black") +
+labs(title = "Histogram of Passenger Count", x = "Passenger Count", y = "Frequency")
+
+```
+
+The bar plot shows how often rides occur based on the number of passengers per trip. It is clear that rides with one passenger are the most common, greatly outnumbering rides with multiple passengers. As the number of passengers increases, there is a noticeable decrease in frequency, indicating that group rides are much less frequent.
+
+```{r, message=FALSE}
+# Histogram for 'ride_distance_km'
+ggplot(df, aes(x = ride_distance_km)) +
+  geom_histogram(bins = 400, fill = "blue", color = "lightblue") +
+  coord_cartesian(xlim = c(0, 20))+
+  labs(title = "Histogram of Ride Distance", x = "Ride Distance (km)", y = "Frequency")
+```
+
+The histogram displays the frequency of ride distances. Short rides are more common with a sharp decrease as distance increases. The majority of rides are under 5 kilometers, suggesting that the service is mainly used for short trips.
+
+```{r, message=FALSE}
+# Histogram for 'pickup_dist_to_nyc_center'
+ggplot(df, aes(x = pickup_dist_to_nyc_center)) +
+  geom_histogram( bins = 150, fill = "blue", color = "black") +
+  coord_cartesian(xlim = c(0, 25))+
+  labs(title = "Histogram of pickup_dist_to_nyc_center", x = "pickup_dist_to_nyc_center", y = "Frequency")
+
+```
+
+This histogram illustrates the number of pickups made from different distances to the center of New York City. The data indicates that there are several peaks in the distribution, which suggests that pickups are concentrated around certain distances from the city center. The most common pickup distances are less than 5 kilometers, which implies that the service is frequently used within close proximity to the city center. There are also smaller peaks at greater distances, which means that some riders use the service from or to more distant locations but less frequently.
+
+```{r, message=TRUE, warning=TRUE}
+
+# Aggregate data to get average fare amount by pickup hour
+hourly_fares <- df %>%
+  group_by(pickup_hour) %>%
+  summarise(average_fare = mean(fare_amount, na.rm = TRUE))
+
+# Create a line plot
+ggplot(hourly_fares, aes(x = pickup_hour, y = average_fare, group = 1)) +
+  geom_line() + 
+  geom_point() +  # Adding points can help visualize individual hour data points
+  labs(title = "Average Fare Amount by Pickup Hour",
+       x = "Hour of the Day",
+       y = "Average Fare Amount ($)")
+
+```
+
+This graph shows the average fare price plotted against the hour of the day. It reveals an interesting pattern whereby, between 3 am and 6 am, the average fare price increases from around \$12 to \$16. One possible explanation for this hike could be the reduced number of Uber drivers available during these hours and the increased demand for rides to places like airports or workplaces.
+
+# Setting up for the Models
+
+It's time to fit our data into models to predict the fares of Uber rides accurately. However, before doing so, we need to set up our data by splitting it, creating the recipe, and creating folds for k-fold cross-validation.
+
+### Splitting the data
+
+We'll start by splitting the data with a 70/30 ratio, which means that we'll use 70% of the data to train our models, and the remaining 30% to test the accuracy of our models on data that it wasn't trained on. We'll also stratify the outcome variable to ensure an equal allocation to each group. After the data split, we'll verify that it occurred correctly.
+
+Next, we'll create 5 folds for cross-validation, stratifying to the outcome variable. This will enable us to train models across 5 splits in our training data, which will further enhance model reliability.
+
+In k-fold cross-validation, we partition the original training set into k equal-sized subsets or folds. The model training and evaluation process occur k times, with each iteration using a different fold as the testing set and the remaining k-1 folds combined as the training set. This aggregated performance metric provides an estimate of the model's generalization capability on unseen data.
+
+```{r, message=FALSE}
+# Setting the seed for reproducibility
+set.seed(990)
+
+# Splitting the data 70/30 split
+df_split <- initial_split(df, prop = 0.7, strata = fare_amount)
+df_train <- training(df_split)
+df_test <- testing(df_split)
+
+
+#check data split 
+nrow(df_train)/nrow(df)
+nrow(df_test)/nrow(df)
+
+# 5 folds for cross-validation, stratified across for fare_amonut
+df_folds <- vfold_cv(df_train, v = 5, strata = fare_amount)
+```
+
+### Recipe Creation
+
+In the next step, we will create a Recipe that will serve as the foundation for all our Models. We will use the same set of predictors and outcome variable in this Recipe, allowing us to create one universal Recipe that can be used across all our Models. The Recipe will include the target variable `fare_amount` and predictors such as `pickup_hour`, `day_of_week`, `passenger_count`, `ride_distance_km`, `year`, `month`, and `pickup_dist_to_nyc_center`.
+
+We will exclude `pickup_longitude`, `pickup_latitude`, `dropoff_longitude`, and `dropoff_latitude` from this Recipe. These predictors are not usable in our Models, and we have already extracted useful features such as `ride_distance_km` and `pickup_dist_to_nyc_center` from them.
+
+To normalize all numeric predictors, we will center and scale them. For categorical variables like `pickup_hour` and `day_of_week`, we will perform one-hot encoding to create dummy variables representing their different levels. The Recipe also includes instructions to handle novel categories and unknown values in categorical variables during prediction. Each Model will take this universal Recipe and apply the corresponding methods associated with that specific modeling technique.
+
+```{r, message=FALSE}
+#create Recipe 
+recipe <- recipe(fare_amount ~ pickup_hour + day_of_week + passenger_count + ride_distance_km + year + month + pickup_dist_to_nyc_center, data = df) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors(), -all_outcomes()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_unknown(all_nominal_predictors())
+
+
+```
+
+Now that we have the recipe created we can continue with fitting our models!
+
+# Fitting Models
+
+In this part, we will set up all the prerequisites for tuning our models and fitting them to our training data.
+
+We have chosen the follwing models to proceed with
+
+-   `Linear Regression`: This model is a good baseline for prediction and is interpretable and fast to compute.
+
+-   `Elastic Net`: This model balances between Lasso and Ridge penalties, making it suitable for models with multiple features that may have multicollinearity.
+
+-   `Lasso Regression`: This model is effective at feature selection by shrinking the less important feature's coefficients to zero, which is useful for models with high dimensionality.
+
+-   `Ridge Regression`: This model is best suited for addressing multicollinearity in data with many highly correlated predictors by imposing a penalty on the size of coefficients.
+
+-   `Polynomial Regression`: This model can capture non-linear relationships by transforming features into polynomial terms, allowing for more complex patterns in the data.
+
+-   `Boosted Trees`: This model utilizes the boosting technique to convert weak learners into a strong learner, making it effective for various types of data including non-linear relationships.
+
+-   `Random Forest`: This model is an ensemble method that can handle a large number of features and is good for avoiding over-fitting by averaging multiple decision trees.
+
+-   `K Nearest Neighbors`: This non-parametric method makes predictions based on the proximity of data points, making it suitable for data sets where similar instances have similar outcomes.
+
+1.  First, we will define our model objects, specify the mode we will be using, regression, for this project, and add any tuning/penalty specifications.
+
+```{r, message=FALSE}
+
+# Linear regression
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+
+# Ridge regression
+ridge_spec <- linear_reg(mixture = 0, penalty = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+# Lasso regression
+lasso_spec <- linear_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+# Polynomial regression
+# Tuning the degree
+poly_recipe <- recipe %>% 
+  step_poly(all_numeric_predictors(), degree = tune())
+
+poly_spec <- linear_reg() %>% 
+  set_mode("regression") %>% 
+  set_engine("lm")
+
+# KNN
+knn_spec <- nearest_neighbor(neighbors = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("kknn")
+
+# Elastic net
+elastic_spec <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+# Random forest
+rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger", importance = "impurity")
+
+# Boosted Trees
+boosted_spec <- boost_tree(trees = tune(), learn_rate = tune(), min_n = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost")
+
+
+
+```
+
+2.  Set up the workflow, add the model and the recipe.
+
+```{r, message=FALSE}
+# linear wf 
+lm_workflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(recipe)
+
+# Ridge wf
+ridge_workflow <- workflow() %>% 
+  add_recipe(recipe) %>% 
+  add_model(ridge_spec)
+
+# Lasso wf
+lasso_workflow <- workflow() %>% 
+  add_recipe(recipe) %>% 
+  add_model(lasso_spec)
+
+# Poly wf
+poly_wf <- workflow() %>% 
+  add_model(poly_spec) %>% 
+  add_recipe(poly_recipe)
+
+# KNN wf
+knn_workflow <- workflow() %>% 
+  add_model(knn_spec) %>% 
+  add_recipe(recipe)
+
+# elastic wf
+elastic_workflow <- workflow() %>% 
+  add_recipe(recipe) %>% 
+  add_model(elastic_spec)
+
+# Random forrest wf
+rf_workflow <- workflow() %>% 
+  add_recipe(recipe) %>% 
+  add_model(rf_spec)
+
+# Boosted wf
+boosted_workflow <- workflow() %>% 
+  add_recipe(recipe) %>% 
+  add_model(boosted_spec)
+```
+
+3.  Defining our tuning grid for the parameters and specifying levels
+
+```{r, message=FALSE}
+
+# Define the tuning grid for each model
+
+# Ridge grid
+ridge_grid <- grid_regular(penalty(range = c(-5, -1)), levels = 50)
+
+# Lasso grid
+lasso_grid <- grid_regular(penalty(range = c(-5, -1)), levels = 5)
+
+# Polynomial grid
+degree_grid <- grid_regular(degree(range = c(1, 1)), levels = 1)
+
+# KNN grid
+knn_grid <- grid_regular(neighbors(range = c(5, 15)), levels = 5)
+
+# Elastic grid
+elastic_grid <- grid_regular(
+  penalty(range = c(-5, -1)),
+  mixture(range = c(0.1, 0.9)),
+  levels = 10
+)
+
+# Random Forest grid
+rf_grid <- grid_regular(
+  mtry(range = c(round(sqrt(7)), round(7/2))),
+  trees(c(500, 1000)),
+  min_n(range = c(5, 20)),
+  levels = 5
+)
+
+# Boosted Trees grid
+boosted_grid <- grid_regular(
+  trees(c(100, 1000)),
+  learn_rate(c(0.001, 0.1)),
+  min_n(range = c(2, 20)),
+  levels = 5
+)
+
+
+
+
+```
+
+4.  Tuning each model based upon tuning grid and workflows, also adding a control grid to inspect model tuning
+
+```{r, message=FALSE, warning=TRUE}
+
+# creating the control object for the tuning process:
+#ctrl <- control_grid(verbose = TRUE)
+
+# # Tuning Ridge Regression
+# ridge_tune <- tune_grid(
+#   ridge_workflow,
+#   resamples = df_folds,
+#   grid = ridge_grid,
+#   control = ctrl
+# )
+# 
+# # Tuning Lasso Regression
+# lasso_tune <- tune_grid(
+#   lasso_workflow,
+#   resamples = df_folds,
+#   grid = lasso_grid,
+#   control = ctrl
+# )
+# 
+# # Tuning Polynomial Regression
+# # Make sure you have created poly_recipe with the step_poly() 
+# # and poly_grid with a degree parameter
+# poly_tune <- tune_grid(
+#   poly_wf,
+#   resamples = df_folds,
+#   grid = degree_grid,
+#     control = ctrl
+# )
+# 
+# # Tuning KNN
+# knn_tune <- tune_grid(
+#   knn_workflow,
+#   resamples = df_folds,
+#   control = ctrl
+# )
+# 
+# # Tuning Elastic Net
+# elastic_tune <- tune_grid(
+#   elastic_workflow,
+#   resamples = df_folds,
+#   grid = elastic_grid,
+#     control = ctrl
+# )
+# 
+# # Tuning Random Forest
+# rf_tune <- tune_grid(
+#   rf_workflow,
+#   resamples = df_folds,
+#   grid = rf_grid,
+#     control = ctrl
+# )
+
+# # Tuning Boosted Trees
+# boosted_tune <- tune_grid(
+#   boosted_workflow,
+#   resamples = df_folds,
+#   grid = boosted_grid,
+#     control = ctrl
+# )
+
+
+```
+
+5.  Save the models into a rds file for instant loading
+
+```{r}
+# Saving our models in .rds file 
+
+# write_rds(ridge_tune, file = "~/131uberproject/models/ridge.rds")
+
+# write_rds(lasso_tune, file = "~/131uberproject/models/lasso.rds")
+
+# write_rds(poly_tune, file = "~/131uberproject/models/poly.rds")
+
+# write_rds(knn_tune, file = "~/131uberproject/models/knn.rds")
+
+# write_rds(elastic_tune, file = "~/131uberproject/models/elastic.rds")
+
+# write_rds(rf_tune, file = "~/131uberproject/models/rf.rds")
+
+
+# write_rds(boosted_tune, file = "~/131uberproject/models/boosted.rds")
+```
+
+6.  Read back in saved models
+
+```{r}
+
+# Reading in models from rds files
+ridge_tuned <- read_rds(file = "~/131uberproject/models/ridge.rds")
+
+lasso_tuned <- read_rds(file = "~/131uberproject/models/lasso.rds")
+
+poly_tuned <- read_rds(file = "~/131uberproject/models/poly.rds")
+
+knn_tuned <- read_rds(file = "~/131uberproject/models/knn.rds")
+
+elastic_tuned <- read_rds(file = "~/131uberproject/models/elastic.rds")
+
+rf_tuned <- read_rds(file = "~/131uberproject/models/rf.rds")
+
+boosted_tuned <- read_rds(file = "~/131uberproject/models/boosted.rds")
+```
+
+7.  Fit basic Linear regression model, and collect metrics
+
+```{r}
+#fitting linear model and collecting metrics 
+lm_fit <- fit_resamples(lm_workflow, resamples = df_folds)
+lm_rmse <- collect_metrics(lm_fit) 
+
+lm_rmse <- lm_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+
+
+```
+
+8.  Collect metrics for remaining models, and table the data
+
+```{r}
+# Ridge regression
+ridge_rmse <- collect_metrics(ridge_tuned) %>% 
+  arrange(mean) 
+
+
+ridge_rmse <- ridge_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+
+# Lasso regression
+lasso_rmse <- collect_metrics(lasso_tuned) %>% 
+  arrange(mean) 
+
+lasso_rmse <- lasso_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+
+# Polynomial regression
+poly_rmse <- collect_metrics(poly_tuned) %>% 
+  arrange(mean) 
+
+poly_rmse <- poly_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+
+# KNN
+knn_rmse <- collect_metrics(knn_tuned) %>% 
+  arrange(mean) 
+
+knn_rmse <- knn_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+# Elastic net
+elastic_rmse <- collect_metrics(elastic_tuned) %>% 
+  arrange(mean) 
+
+elastic_rmse <- elastic_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+
+# Random forest
+rf_rmse <- collect_metrics(rf_tuned) %>% 
+  arrange(mean) 
+
+rf_rmse <- rf_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+# Boosted trees
+boosted_rmse <- collect_metrics(boosted_tuned) %>% 
+  arrange(mean) 
+
+boosted_rmse <- boosted_rmse %>%
+  filter(.metric == "rmse") %>%
+  summarise(mean_rmse = mean(mean), std_error = mean(std_err))
+
+```
+
+## Model Results
+
+Now that we have tuned our models and collected their metrics we can create a table to visualize our results
+
+```{r}
+# Combine Metrics into a table
+model_rmse_summary <- tibble(
+  Model = c("linear Regression","Ridge Regression", "Lasso Regression", "Polynomial Regression",
+            "K Nearest Neighbors", "Elastic Net", "Random Forest", "Boosted Trees"),
+  RMSE = c(lm_rmse$mean_rmse, ridge_rmse$mean_rmse, lasso_rmse$mean_rmse, poly_rmse$mean_rmse,
+           knn_rmse$mean_rmse, elastic_rmse$mean_rmse, rf_rmse$mean_rmse, boosted_rmse$mean_rmse),
+  Std_Error = c(lm_rmse$std_error, ridge_rmse$std_error, lasso_rmse$std_error, poly_rmse$std_error,
+                knn_rmse$std_error, elastic_rmse$std_error, rf_rmse$std_error, boosted_rmse$std_error)
+)
+model_rmse_summary <- model_rmse_summary %>% 
+  arrange(RMSE)
+# Print the summary table
+kable(model_rmse_summary)
+
+```
+
+Based on the outcomes, we can observe that the `Elastic Net model` outperformed the other models on the cross validation folds with an RMSE of `3.98`. The second best model was the Lasso Regression, followed by Ridge Regression in third place. It is interesting to note that the linear models performed better as compared to our more complex models, such as boosted trees. This indicates that our data most likely has a linear relationship.
+
+## Model plots
+
+Next we will plot our models. Auto-plot will alow us to visualize the effect of each tuned parameter in the RMSE of the underlying model.
+
+### Elastic Net Plot
+
+```{r}
+autoplot(elastic_tuned, metric = 'rmse')
+
+```
+
+This Elastic Net plot illustrates the relationship between the amount of regularization applied to the model and the resulting RMSE. Different curves represent various proportions of the Lasso penalty. As the amount of regularization increases (moving right on the x-axis), we initially see a stabilization or slight decrease in RMSE, indicating an optimal balance between bias and variance. However, past a certain threshold of regularization, the RMSE rapidly increases, suggesting that too much regularization is detrimental, likely due to the model needing to be more complex and able to capture the underlying patterns in the data effectively. The choice of Lasso penalty proportion also affects performance, and selecting the right balance is crucial for minimizing RMSE and improving the model's predictive accuracy on the Uber fare dataset.
+
+### Lasso Regression Plot
+
+```{r}
+autoplot(lasso_tuned, metric = 'rmse')
+```
+
+This plot shows the performance of the Lasso regression model across different levels of regularization. The RMSE is stable at lower levels of regularization but starts to increase significantly as the regularization strength increases beyond a certain point. This trend suggests that a small amount of regularization helps to prevent over fitting without sacrificing the model's ability to capture the underlying trend in the data.
+
+## Fitting to training data
+
+Next we will fit the Best elastic model to the entire training set and evaluate its performance compared to the cross validation models
+
+```{r}
+# Collecting metrics on the elastic net model 
+
+best_elastic_model <- elastic_tuned %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  arrange(mean) %>%
+  slice_min(order_by = mean, n = 1)
+
+kable(best_elastic_model)
+
+# Fitting to the training data
+best_train <- select_best(elastic_tuned, metric = 'rmse')
+
+elastic_best_w_train <- finalize_workflow(elastic_workflow, best_elastic_model)
+
+elastic_final_fit_train <- fit(elastic_best_w_train, data = df_train)
+
+```
+
+We can see that our model had a RMSE of `3.998` vs the model trained on folds which had a RMSE of `3.987` which is slightly lower. This could indicate some minimal Under-fitting in our cross validation models.
+
+## Testing the Model
+
+Now we can fit our best elastic net model to the testing data to see how it performs
+
+```{r}
+
+# Creating the predicted vs. actual value tibble
+uber_tibble <- predict(elastic_final_fit_train, new_data = df_test %>% 
+                         dplyr::select(-fare_amount))
+uber_tibble <- bind_cols(uber_tibble, df_test %>% 
+                        dplyr::select(fare_amount))
+
+```
+
+```{r}
+# metric
+uber_metric <- metric_set(rmse)
+
+# RMSE on testing data 
+uber_tibble_metrics <- uber_metric(uber_tibble, truth = fare_amount, estimate = .pred)
+kable(uber_tibble_metrics)
+```
+
+WOW! Our RMSE on our testing data is `4.03` , which is very close to our training RMSE. Overall our model performed decently well at predicting the fair amount considering `fare_amount` is in the range `0-80` . This model is able to explain most of the variation in the outcome variable.
+
+Now lets plot the predicted values vs. actual values
+
+```{r}
+uber_tibble %>% 
+  ggplot(aes(x = .pred, y = fare_amount)) +
+  geom_point(alpha = 0.2) +
+  geom_abline(lty = 4) +
+  labs(title = "Predicted Values vs. Actual Values")
+```
+
+In the plot we can see it is evident that most of the predictions fall within the range of the actual values. The model was found to be most accurate while predicting low fares, but there were certain groupings on the higher end. This could be attributed to a large number of rides that started far from the New York City Center, possibly from the airports into the city. Nonetheless, the model was able to accurately predict those fares.
+
+# Conclusion
+
+In conclusion, the analysis conducted in this project has illuminated several key insights into the prediction of Uber fare prices. Through rigorous examination and cross-validation of a variety of models, we observed that some were more adept at capturing the nuances of the data set. The models that surfaced as top performers, including Elastic Net and Lasso Regression, demonstrated an ability to balance bias and variance effectively, yielding more accurate and generalizable predictions. These models stood out by leveraging the underlying patterns in the data, suggesting that for fare prediction Linear based models were most effective compared to more complex models such as KNN and random forest.
+
+Building upon the findings of this study, future research could explore a wider array of features that could affect fare prices, such as weather conditions, traffic patterns, or special events. Additionally, the deployment of more sophisticated machine learning techniques, like deep learning could unveil further intricacies within the data. The potential integration of real-time data streams to create dynamic pricing models represents a particularly promising avenue for exploration. Lastly, conducting comparative analyses across different geographic locations may yield insights into regional pricing strategies and customer behavior, offering a holistic understanding of the factors influencing Uber fare prices.
