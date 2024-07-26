@@ -59,27 +59,27 @@ install.packages(c("corrplot", "discrim", "corrr", "MASS", "tidyverse", "tidymod
 ```
 
 
-##Data Inspection
+## Data Inspection
 
 Before applying any machine learning techniques, we need to inspect the dataset and modify it as needed. The initial inspection involves reading the data and understanding its structure.
 
-##Data Cleaning
+## Data Cleaning
 
 Data cleaning involves removing unnecessary columns, handling missing values, and correcting errors in the dataset.
 
-##Feature Engineering
+## Feature Engineering
 
 Feature engineering includes adding new features to enhance the dataset's predictive power, such as extracting date and time components and calculating distances.
 
-##Exploratory Data Analysis (EDA)
+## Exploratory Data Analysis (EDA)
 
 EDA involves analyzing the distribution and relationships between variables to gain insights into the dataset.
 
-##Model Preparation
+## Model Preparation
 
 Model preparation includes splitting the data into training and testing sets and creating a recipe for the models. The recipe involves normalizing numeric predictors and one-hot encoding categorical variables.
 
-##Model Fitting and Tuning
+## Model Fitting and Tuning
 
 Various models are fitted and tuned to find the best performing model. The models used in this project include:
 
@@ -95,14 +95,14 @@ Results and Evaluation
 
 The performance of each model is evaluated using Root Mean Squared Error (RMSE). The best model is selected based on the lowest RMSE.
 
-##Conclusion
+## Conclusion
 
 The project concludes with insights drawn from the analysis and the performance of the models. Suggestions for future research and potential improvements are also provided.
 
-##Contributing
+## Contributing
 
 Contributions are welcome! If you would like to contribute to this project, please fork the repository and submit a pull request.
 
-##License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
